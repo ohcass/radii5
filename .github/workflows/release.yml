@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: macos-amd64
+            upx: false
+          - goos: darwin
+            goarch: arm64
+            suffix: macos-arm64
+            upx: false
+          - goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+            ext: .exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install UPX
+        run: sudo apt-get update && sudo apt-get install -y upx
+
+      - name: Build & compress
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          BINARY="radii5-${{ matrix.suffix }}${{ matrix.ext }}"
+          VERSION="${GITHUB_REF_NAME}"
+          go build -ldflags="-s -w -X main.version=${VERSION}" -o "${BINARY}" ./cmd/radii5
+          if [ "${{ matrix.upx }}" != "false" ]; then
+            upx --best --lzma "${BINARY}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: radii5-${{ matrix.suffix }}
+          path: radii5-${{ matrix.suffix }}${{ matrix.ext }}
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bsdiff
+        run: sudo apt-get update && sudo apt-get install -y bsdiff
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate bsdiff patches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+
+          # Find previous release (skip current tag if re-run)
+          PREV_TAG=""
+          while IFS= read -r tag; do
+            if [ "$tag" != "$VERSION" ]; then
+              PREV_TAG="$tag"
+              break
+            fi
+          done < <(gh release list --repo "${{ github.repository }}" --limit 10 --json tagName --jq '.[].tagName')
+
+          if [ -n "${PREV_TAG}" ]; then
+            echo "Previous release: ${PREV_TAG}"
+
+            cd dist
+
+            for asset in radii5-*; do
+              [ -f "${asset}" ] || continue
+
+              # Extract platform suffix: radii5-linux-amd64.exe → linux-amd64
+              SUFFIX="${asset#radii5-}"
+              SUFFIX="${SUFFIX%.exe}"
+
+              # Download previous release's binary for this platform
+              PREV_URL="https://github.com/${{ github.repository }}/releases/download/${PREV_TAG}/${asset}"
+              echo "  downloading previous: ${asset}"
+
+              if curl -fsSL -o "prev_${asset}" "${PREV_URL}"; then
+                PATCH_NAME="patch_${SUFFIX}_${PREV_TAG}_${VERSION}.bspatch"
+                bsdiff "prev_${asset}" "${asset}" "${PATCH_NAME}"
+
+                BINARY_SIZE=$(stat -c%s "${asset}" 2>/dev/null)
+                PATCH_SIZE=$(stat -c%s "${PATCH_NAME}" 2>/dev/null)
+                echo "  patch: ${PATCH_NAME} (${PATCH_SIZE} bytes, binary: ${BINARY_SIZE} bytes)"
+
+                if [ "${PATCH_SIZE}" -ge "${BINARY_SIZE}" ]; then
+                  echo "  patch larger than binary, discarding"
+                  rm -f "${PATCH_NAME}"
+                fi
+
+                rm -f "prev_${asset}"
+              else
+                echo "  no previous binary for ${asset}, skipping"
+              fi
+            done
+
+            cd ..
+          else
+            echo "No previous release found, skipping patches"
+          fi
+
+      - name: Compute SHA256
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          echo "## SHA256 Checksums" > release_notes.md
+          echo "" >> release_notes.md
+          echo "Verify your download with these checksums:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo '```' >> release_notes.md
+          cat checksums.txt >> release_notes.md
+          echo '```' >> release_notes.md
+          cat release_notes.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: dist/release_notes.md
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
