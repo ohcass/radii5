@@ -5,14 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/ohcass/radii5/internal/metadata"
+	"github.com/ohcass/radii5/internal/progress"
 )
 
 type PlaylistEntry struct {
@@ -31,7 +32,7 @@ type resolvedEntry struct {
 
 func ResolvePlaylist(playlistURL string) ([]PlaylistEntry, string, error) {
 	ytdlp := findBin("yt-dlp")
-	cmd := buildCommand(ytdlp,
+	cmd := exec.Command(ytdlp,
 		"--flat-playlist",
 		"--dump-json",
 		"--no-warnings",
@@ -77,103 +78,10 @@ func ResolvePlaylist(playlistURL string) ([]PlaylistEntry, string, error) {
 	return entries, playlistTitle, nil
 }
 
-const titleWidth = 46
 
-func truncTitle(title string) string {
-	runes := []rune(title)
-	if len(runes) > titleWidth {
-		return string(runes[:titleWidth-3]) + "..."
-	}
-
-	s := string(runes)
-	for len([]rune(s)) < titleWidth {
-		s += " "
-	}
-	return s
-}
-
-type slotState struct {
-	tp          *TrackProgress
-	oldTitle    string
-	oldFailed   bool
-	slideOffset int
-	sliding     bool
-}
-
-func renderTitle(s *slotState) string {
-	tp := s.tp
-	title := tp.Title
-	current := tp.Current.Load()
-	total := tp.Total.Load()
-	done := tp.Done.Load()
-	failed := tp.Failed.Load()
-	converting := tp.Converting.Load()
-	convertPct := tp.ConvertPct.Load()
-
-	display := truncTitle(title)
-
-	if s.sliding {
-		oldStr := truncTitle(s.oldTitle)
-		offset := s.slideOffset
-		if offset > titleWidth {
-			offset = titleWidth
-		}
-
-		newRunes := []rune(display)
-		oldRunes := []rune(oldStr)
-
-		leftPart := string(newRunes[titleWidth-offset : titleWidth])
-		rightPart := string(oldRunes[0 : titleWidth-offset])
-
-		oldColor := "\033[90m"
-		if s.oldFailed {
-			oldColor = "\033[31m"
-		}
-
-		return fmt.Sprintf("  \033[36m→  \033[90m%s\033[0m%s%s\033[0m", leftPart, oldColor, rightPart)
-	}
-
-	if failed {
-		return fmt.Sprintf("  \033[31m✗  %s\033[0m", display)
-	}
-
-	if done {
-		return fmt.Sprintf("  \033[36m✓  \033[36m%s\033[0m", display)
-	}
-
-	if converting {
-		// cyan sweep right→left: filled from right side
-		runes := []rune(display)
-		filled := int(float64(convertPct) / 100.0 * float64(len(runes)))
-		if filled > len(runes) {
-			filled = len(runes)
-		}
-		if filled < 0 {
-			filled = 0
-		}
-		rest := string(runes[:len(runes)-filled])
-		cyanStr := string(runes[len(runes)-filled:])
-		return fmt.Sprintf("  \033[36m⟳  \033[0m\033[32m%s\033[36m%s\033[0m", rest, cyanStr)
-	}
-
-	if total <= 0 || current <= 0 {
-		return fmt.Sprintf("  \033[90m↻  %s\033[0m", display)
-	}
-
-	pct := float64(current) / float64(total)
-	runes := []rune(display)
-	filled := int(pct * float64(len(runes)))
-	if filled > len(runes) {
-		filled = len(runes)
-	}
-	greenStr := string(runes[:filled])
-	rest := string(runes[filled:])
-	return fmt.Sprintf("  \033[33m↓  \033[32m%s\033[90m%s\033[0m", greenStr, rest)
-}
 
 func runBatch(entries []PlaylistEntry, format, outputDir string, threads, workers int, mediaType string, quality int,
-	done *atomic.Int64, failed *atomic.Int64, total int64,
-	startTime time.Time, json bool) []PlaylistEntry {
+	done *atomic.Int64, failed *atomic.Int64, total int64, json bool, retrying bool, spinner *progress.Spinner, playlistTitle string) []PlaylistEntry {
 
 	type result struct {
 		entry PlaylistEntry
@@ -189,55 +97,115 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 	}
 	close(resolveQueue)
 
-	slots := make([]*slotState, workers)
+	slots := make([]*TrackProgress, workers)
 	for i := range slots {
-		slots[i] = &slotState{tp: &TrackProgress{}}
+		slots[i] = &TrackProgress{}
 	}
 
-	var mu sync.Mutex
+	var (
+		mu       sync.Mutex
+		barPos   = 11
+		barDir   = -1
+		barCycle = 0
+		barWait  = 0
+		dispPct  = 0
+		dispTime = time.Now()
+	)
 
 	render := func() {
 		d := done.Load()
-		f := failed.Load()
 
-		width := 30
-		filled := 0
-		pct := 0
-		if total > 0 {
-			pct = int(float64(d) / float64(total) * 100)
-			filled = int(float64(d) / float64(total) * float64(width))
-			if filled > width {
-				filled = width
+		if barWait > 0 {
+			barWait--
+		} else {
+			barPos += barDir
+			lo := -9
+			hi := 11
+			if barPos > hi {
+				barDir = -1
+				barCycle++
+				if barCycle%1 == 0 {
+					barWait = 20
+				}
+			} else if barPos < lo {
+				barDir = 1
 			}
 		}
-		bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-		elapsed := time.Since(startTime).Round(time.Second)
-		remaining := total - d - f
 
-		failStr := ""
-		if f > 0 {
-			failStr = fmt.Sprintf("  \033[31m·  %d failed\033[0m", f)
+		var sb strings.Builder
+		sb.Grow(8 * 12)
+		cols := [][]string{
+			{
+				"\033[38;2;104;163;235m",
+				"\033[38;2;101;157;248m",
+				"\033[38;2;70;105;165m",
+				"\033[38;2;48;73;110m",
+				"\033[38;2;36;51;74m",
+				"\033[38;2;26;37;52m",
+			},
+			{
+				"\033[38;2;235;150;70m",
+				"\033[38;2;200;125;55m",
+				"\033[38;2;165;100;45m",
+				"\033[38;2;130;75;35m",
+				"\033[38;2;95;55;25m",
+				"\033[38;2;60;35;15m",
+			},
 		}
+		pal := 0
+		if retrying {
+			pal = 1
+		}
+		for i := 0; i < 8; i++ {
+			bi := i - barPos
+			if bi >= 0 && bi < 6 {
+				idx := bi
+				if barDir > 0 {
+					idx = 5 - bi
+				}
+				sb.WriteString(cols[pal][idx])
+				sb.WriteString("■")
+			} else {
+				sb.WriteString("\033[38;5;239m·")
+			}
+		}
+		sb.WriteString("\033[0m")
 
-		fmt.Printf("\r\033[K  \033[36m[%s]\033[0m  \033[97m%d / %d\033[0m  \033[90m(%d%%)\033[0m\n", bar, d, total, pct)
-
-		for i := 0; i < workers; i++ {
-			s := slots[i]
-
-			if s.sliding {
-				s.slideOffset += 4
-				if s.slideOffset >= titleWidth {
-					s.sliding = false
-					s.slideOffset = titleWidth
+		pct := dispPct
+		if total > 0 {
+			partial := 0.0
+			for _, tp := range slots {
+				cur := tp.Current.Load()
+				ttl := tp.Total.Load()
+				if ttl > 0 {
+					partial += float64(cur) / float64(ttl)
 				}
 			}
-
-			line := renderTitle(s)
-			fmt.Printf("\033[K%s\n", line)
+			rawPct := int((float64(d) + partial) / float64(total) * 100)
+			if rawPct > 100 {
+				rawPct = 100
+			}
+			if rawPct > dispPct {
+				now := time.Now()
+				elapsed := now.Sub(dispTime).Seconds()
+				rate := float64(rawPct-dispPct) / elapsed
+				step := 1
+				switch {
+				case rate > 50:
+					step = 10
+				case rate > 10:
+					step = 5
+				}
+				disp := (rawPct / step) * step
+				if disp > dispPct || rawPct >= 100 {
+					dispPct = disp
+					dispTime = now
+				}
+			}
+			pct = dispPct
 		}
 
-		fmt.Printf("\033[K  \033[90m%d left  ·  %s%s\033[0m", remaining, elapsed, failStr)
-		fmt.Printf("\033[%dA\r", workers+1)
+		fmt.Printf("\033[2K\r  %s \033[1m%d%%\033[0m", sb.String(), pct)
 	}
 
 	const resolvers = 8
@@ -264,19 +232,8 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 		slotIdx := i
 		go func() {
 			defer dlWg.Done()
+			tp := slots[slotIdx]
 			for re := range downloadQueue {
-				s := slots[slotIdx]
-				tp := s.tp
-
-				mu.Lock()
-				if tp.Title != "" && !tp.Failed.Load() {
-					s.oldTitle = tp.Title
-					s.oldFailed = tp.Failed.Load()
-					s.sliding = true
-					s.slideOffset = 0
-				}
-				mu.Unlock()
-
 				if re.err != nil {
 					tp.Reset(re.entry.Title, 0, re.entry.WebpageURL)
 					tp.Failed.Store(true)
@@ -289,13 +246,13 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 					tp.Total.Store(re.info.FilesizeApprox)
 				}
 
-			err := downloadResolved(re.info, re.entry.WebpageURL, format, outputDir, threads, tp, mediaType, quality)
-			if err != nil {
-				tp.Failed.Store(true)
-			} else {
-				tp.Done.Store(true)
-			}
-			results <- result{entry: re.entry, err: err}
+				err := downloadResolved(re.info, re.entry.WebpageURL, format, outputDir, threads, tp, mediaType, quality)
+				if err != nil {
+					tp.Failed.Store(true)
+				} else {
+					tp.Done.Store(true)
+				}
+				results <- result{entry: re.entry, err: err}
 			}
 		}()
 	}
@@ -329,8 +286,7 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 					func() {
 						mu.Lock()
 						defer mu.Unlock()
-						for i, s := range slots {
-							tp := s.tp
+						for i, tp := range slots {
 							title := tp.Title
 							url := tp.URL
 							if title == "" {
@@ -385,14 +341,39 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 		}()
 	} else {
 		go func() {
+			stopped := spinner == nil
+			ticker := time.NewTicker(80 * time.Millisecond)
+			defer ticker.Stop()
 			for {
 				select {
 				case <-stopRender:
+					if !stopped {
+						spinner.Stop()
+					}
 					return
-				case <-time.After(80 * time.Millisecond):
-					mu.Lock()
-					render()
-					mu.Unlock()
+				case <-ticker.C:
+					if !stopped {
+						var started bool
+						for _, tp := range slots {
+							if tp.Current.Load() > 0 || tp.Done.Load() {
+								started = true
+								break
+							}
+						}
+						if started {
+							spinner.Stop()
+							if !json && playlistTitle != "" {
+								fmt.Printf("  %s\n", playlistTitle)
+								fmt.Print("\033[?25l")
+							}
+							stopped = true
+						}
+					}
+					if stopped {
+						mu.Lock()
+						render()
+						mu.Unlock()
+					}
 				}
 			}
 		}()
@@ -467,8 +448,6 @@ func downloadResolved(info *VideoInfo, originalURL, format, outputDir string, th
 				}
 				return fmt.Errorf("conversion failed: %w", err)
 			}
-			// Don't clear Converting here — runBatch will set Done
-			// (higher render priority) and tp.Reset clears it for next track.
 			os.Remove(tmpFile)
 		} else {
 			if err := os.Rename(tmpFile, outFile); err != nil {
@@ -477,7 +456,7 @@ func downloadResolved(info *VideoInfo, originalURL, format, outputDir string, th
 		}
 
 		if format == "mp3" && mediaType != "video" {
-			_ = writeMP3Tags(outFile, info)
+			_ = metadata.WriteMP3Tags(outFile, info.Title, info.DisplayArtist(), info.Album, info.Thumbnail)
 		}
 
 	} else {
@@ -489,32 +468,30 @@ func downloadResolved(info *VideoInfo, originalURL, format, outputDir string, th
 	return nil
 }
 
-func writeMP3Tags(outFile string, info *VideoInfo) error {
-	return metadata.WriteMP3Tags(outFile, info.Title, info.DisplayArtist(), info.Album, info.Thumbnail)
-}
-
 func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers int, mediaType string, quality int, json bool) error {
+	var spinner *progress.Spinner
 	if json {
 		writeJSONEvent("resolving", map[string]any{"url": playlistURL})
 	} else {
-		bold := color.New(color.FgWhite, color.Bold)
-		cyan := color.New(color.FgCyan)
-
-		fmt.Print("\033[?25l")
-		defer fmt.Print("\033[?25h")
-		fmt.Println()
-		cyan.Print("  → ")
-		bold.Println("Resolving playlist...")
+		spinner = progress.NewSpinner("Resolving playlist")
+		spinner.Start()
 	}
 
 	entries, playlistTitle, err := ResolvePlaylist(playlistURL)
+
 	if err != nil {
+		if spinner != nil {
+			spinner.Stop()
+		}
 		if json {
 			writeJSONEvent("error", map[string]any{"url": playlistURL, "error": err.Error()})
 		}
 		return fmt.Errorf("could not resolve playlist: %w", err)
 	}
 	if len(entries) == 0 {
+		if spinner != nil {
+			spinner.Stop()
+		}
 		if json {
 			writeJSONEvent("error", map[string]any{"url": playlistURL, "error": "no tracks found"})
 		}
@@ -523,7 +500,6 @@ func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers in
 
 	total := int64(len(entries))
 
-	// Organize: video/ subfolder for video, playlist gets its own folder
 	playlistDir := sanitizeFilename(playlistTitle)
 	if mediaType == "video" {
 		outputDir = filepath.Join(outputDir, "video", playlistDir)
@@ -531,11 +507,10 @@ func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers in
 		outputDir = filepath.Join(outputDir, playlistDir)
 	}
 
-	fmt.Println()
 	if json {
 		writeJSONEvent("playlist_resolved", map[string]any{
-			"title":  playlistTitle,
-			"count":  total,
+			"title": playlistTitle,
+			"count": total,
 			"format": func() string {
 				if mediaType == "video" {
 					return "mp4"
@@ -545,19 +520,12 @@ func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers in
 			"workers": workers,
 			"threads": threads,
 		})
-	} else {
-		dispFormat := format
-		if mediaType == "video" {
-			dispFormat = "mp4"
-		}
-		bold := color.New(color.FgWhite, color.Bold)
-		gray := color.New(color.FgHiBlack)
-		bold.Printf("  %d tracks", total)
-		gray.Printf("  ·  %d workers  ·  %d threads  ·  %s\n", workers, threads, dispFormat)
-		fmt.Println()
 	}
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		if spinner != nil {
+			spinner.Stop()
+		}
 		return fmt.Errorf("cannot create output dir: %w", err)
 	}
 
@@ -568,36 +536,18 @@ func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers in
 	)
 
 	failedEntries := runBatch(entries, format, outputDir, threads, workers, mediaType, quality,
-		&done, &failed, total, startTime, json)
+		&done, &failed, total, json, false, spinner, playlistTitle)
 
 	for len(failedEntries) > 0 {
-		if !json {
-			for i := 0; i < workers+2; i++ {
-				fmt.Print("\033[1B\033[K")
-			}
-			fmt.Printf("\033[%dA\r", workers+2)
-			fmt.Println()
-			yellow := color.New(color.FgYellow)
-			yellow.Printf("  ↻  Retrying %d failed track(s)...\n", len(failedEntries))
-			fmt.Println()
-		}
-
 		failed.Store(0)
 		prev := len(failedEntries)
 
 		failedEntries = runBatch(failedEntries, format, outputDir, threads, workers, mediaType, quality,
-			&done, &failed, total, startTime, json)
+			&done, &failed, total, json, true, nil, "")
 
 		if len(failedEntries) >= prev {
 			break
 		}
-	}
-
-	if !json {
-		for i := 0; i < workers+2; i++ {
-			fmt.Print("\033[1B\033[K")
-		}
-		fmt.Printf("\033[%dA\r", workers+2)
 	}
 
 	elapsed := time.Since(startTime).Round(time.Millisecond)
@@ -610,23 +560,11 @@ func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers in
 			"elapsed":    elapsed.String(),
 		})
 	} else {
-		green := color.New(color.FgGreen, color.Bold)
-		red := color.New(color.FgRed)
-		gray := color.New(color.FgHiBlack)
-		fmt.Println()
-		green.Printf("  ✓  %d downloaded", done.Load())
-		if failed.Load() > 0 {
-			red.Printf("  ·  %d failed", failed.Load())
-		}
-		gray.Printf("  (%s)\n", elapsed)
-		fmt.Println()
-
+		fmt.Print("\033[?25h\033[2K\r\033[1A\033[2K\r  Done\n")
 		if len(failedEntries) > 0 {
-			gray.Println("  failed tracks:")
 			for _, t := range failedEntries {
-				fmt.Printf("    · %s\n", t.Title)
+				fmt.Printf("  \033[31m✗  %s\033[0m\n", t.Title)
 			}
-			fmt.Println()
 		}
 	}
 

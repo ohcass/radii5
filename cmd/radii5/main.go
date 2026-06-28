@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 
 	"github.com/gabstv/go-bsdiff/pkg/bspatch"
@@ -72,11 +71,11 @@ func main() {
 					if c.NArg() != 3 {
 						return fmt.Errorf("usage: radii5 bspatch oldfile newfile patchfile")
 					}
-					old, err := ioutil.ReadFile(c.Args().Get(0))
+					old, err := os.ReadFile(c.Args().Get(0))
 					if err != nil {
 						return fmt.Errorf("read old: %w", err)
 					}
-					patch, err := ioutil.ReadFile(c.Args().Get(2))
+					patch, err := os.ReadFile(c.Args().Get(2))
 					if err != nil {
 						return fmt.Errorf("read patch: %w", err)
 					}
@@ -84,7 +83,7 @@ func main() {
 					if err != nil {
 						return fmt.Errorf("patch: %w", err)
 					}
-					return ioutil.WriteFile(c.Args().Get(1), out, 0755)
+					return os.WriteFile(c.Args().Get(1), out, 0755)
 				},
 			},
 		},

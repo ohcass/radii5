@@ -115,7 +115,7 @@ func ParseArgs(args []string) Options {
 			}
 		case "--json":
 			opts.JSON = true
-		case "-mp4":
+		case "--mp4", "-mp4":
 			opts.MediaType = "video"
 			if i+1 < len(args) {
 				i++

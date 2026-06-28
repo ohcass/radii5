@@ -55,6 +55,12 @@ func TestParseSizeStr(t *testing.T) {
 	}
 }
 
+func formatDuration(secs float64) string {
+	m := int(secs) / 60
+	s := int(secs) % 60
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		secs float64
@@ -78,11 +84,11 @@ func TestFormatDuration(t *testing.T) {
 
 func TestParseYtDlpProgress(t *testing.T) {
 	tests := []struct {
-		line            string
-		wantPct         float64
-		wantTotal       int64
-		wantCurrent     int64
-		wantOk          bool
+		line        string
+		wantPct     float64
+		wantTotal   int64
+		wantCurrent int64
+		wantOk      bool
 	}{
 		{"[download]  45.2% of 3.24MiB at 1.2 MiB/s ETA 00:02", 45.2, 3397386, 1535618, true},
 		{"[download] 100.0% of 1.70MiB at 2.5 MiB/s ETA 00:00", 100.0, 1782579, 1782579, true},

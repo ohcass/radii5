@@ -127,8 +127,3 @@ func WriteMP3Tags(path, title, artist, album, thumbnailURL string) error {
 
 	return tag.Save()
 }
-
-// fetchImage is kept for backward compatibility but deprecated
-func fetchImage(url string) ([]byte, error) {
-	return fetchImageWithValidation(url)
-}
