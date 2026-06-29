@@ -266,35 +266,35 @@ function Install-Binary([string]$Url, [string]$Dest) {
     $size    = (Get-Item $Dest).Length
     $mbps    = [math]::Round(($size / 1MB) / $secs, 1)
     $elapsed = [math]::Round($secs, 1)
-    Write-Host "  $esc[32m✓$esc[0m$esc[2m done  ${mbps} MB/s  (${elapsed}s,  $threads threads)$esc[0m"
+    Write-Host "  ${esc}[32m✓${esc}[0m${esc}[2m done  ${mbps} MB/s  (${elapsed}s,  $threads threads)${esc}[0m"
 }
 
 # ── 1. yt-dlp ─────────────────────────────────────────────────────────────────
 if (Get-Command "yt-dlp.exe" -ErrorAction SilentlyContinue) {
-    Write-Host "  `e[2m✓ yt-dlp already installed`e[0m"
+    Write-Host "  ${esc}[2m✓ yt-dlp already installed${esc}[0m"
     Write-Host ""
 } else {
-    Write-Host "  `e[36m→`e[0m  yt-dlp"
+    Write-Host "  ${esc}[36m→${esc}[0m  yt-dlp"
     $ytRel   = Get-GHRelease "yt-dlp/yt-dlp"
     $ytAsset = $ytRel.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
-    if (-not $ytAsset) { Write-Host "  `e[31m✗`e[0m yt-dlp.exe not found" -ForegroundColor Red; exit 1 }
+    if (-not $ytAsset) { Write-Host "  ${esc}[31m✗${esc}[0m yt-dlp.exe not found" -ForegroundColor Red; exit 1 }
 
     $ytDest = Join-Path $installDir "yt-dlp.exe"
-    Write-Host "  `e[2mversion`e[0m  $($ytRel.tag_name)"
-    Write-Host "  `e[2mdest   `e[0m  $ytDest"
+    Write-Host "  ${esc}[2mversion${esc}[0m  $($ytRel.tag_name)"
+    Write-Host "  ${esc}[2mdest   ${esc}[0m  $ytDest"
     Write-Host ""
     Install-Binary -Url $ytAsset.browser_download_url -Dest $ytDest
-    Write-Host "  `e[32m✓`e[0m yt-dlp $($ytRel.tag_name)"
+    Write-Host "  ${esc}[32m✓${esc}[0m yt-dlp $($ytRel.tag_name)"
     Write-Host ""
 }
 
 # ── 2. ffmpeg ─────────────────────────────────────────────────────────────────
 $ffDest = Join-Path $installDir "ffmpeg.exe"
 if (Test-Path $ffDest) {
-    Write-Host "  `e[2m✓ ffmpeg already installed`e[0m"
+    Write-Host "  ${esc}[2m✓ ffmpeg already installed${esc}[0m"
     Write-Host ""
 } else {
-    Write-Host "  `e[36m→`e[0m  ffmpeg"
+    Write-Host "  ${esc}[36m→${esc}[0m  ffmpeg"
     try {
         $ffRel   = Get-GHRelease "BtbN/FFmpeg-Builds"
         $ffAsset = $ffRel.assets |
@@ -310,13 +310,13 @@ if (Test-Path $ffDest) {
         $ffZip = Join-Path $env:TEMP "ffmpeg-radii5.zip"
         $ffTmp = Join-Path $env:TEMP "ffmpeg-radii5-extract"
 
-        Write-Host "  `e[2msize   `e[0m  $([math]::Round($ffAsset.size / 1MB, 1)) MB (zip)"
-        Write-Host "  `e[2mdest   `e[0m  $installDir"
+        Write-Host "  ${esc}[2msize   ${esc}[0m  $([math]::Round($ffAsset.size / 1MB, 1)) MB (zip)"
+        Write-Host "  ${esc}[2mdest   ${esc}[0m  $installDir"
         Write-Host ""
 
         Install-Binary -Url $ffAsset.browser_download_url -Dest $ffZip
 
-        Write-Host "  `e[2mextracting...`e[0m"
+        Write-Host "  ${esc}[2mextracting...${esc}[0m"
         if (Test-Path $ffTmp) { Remove-Item $ffTmp -Recurse -Force }
         Expand-Archive -Path $ffZip -DestinationPath $ffTmp -Force
         Remove-Item $ffZip -Force
@@ -330,10 +330,10 @@ if (Test-Path $ffDest) {
         }
         Remove-Item $ffTmp -Recurse -Force
 
-        Write-Host "  `e[32m✓`e[0m ffmpeg installed"
+        Write-Host "  ${esc}[32m✓${esc}[0m ffmpeg installed"
         Write-Host ""
     } catch {
-        Write-Host "  `e[33m⚠`e[0m ffmpeg install failed: $_" -ForegroundColor Yellow
+        Write-Host "  ${esc}[33m⚠${esc}[0m ffmpeg install failed: $_" -ForegroundColor Yellow
         Write-Host "  Install manually: https://ffmpeg.org/download.html"
         Write-Host ""
     }
@@ -350,9 +350,9 @@ if (Test-Path $r5Dest) {
     $checksums = (Invoke-RestMethod $checksumsUrl) -split "`n"
     $expectedHash = ($checksums | Where-Object { $_ -like "*$assetName*" } | ForEach-Object { $_.Split(' ')[0] }).ToLower()
     if ($installedHash -eq $expectedHash) {
-        Write-Host "  `e[2m✓ radii5 up to date`e[0m"
+        Write-Host "  ${esc}[2m✓ radii5 up to date${esc}[0m"
     } else {
-        Write-Host "  `e[36m→`e[0m  updating radii5..."
+        Write-Host "  ${esc}[36m→${esc}[0m  updating radii5..."
         $patched = $false
 
         # Try bsdiff patch for incremental update
@@ -368,7 +368,7 @@ if (Test-Path $r5Dest) {
                 $patchPath = Join-Path $tmpDir "update.bspatch"
                 $newBin = Join-Path $tmpDir "radii5-new.exe"
 
-                Write-Host "  `e[2mpatch: $patchName`e[0m"
+                Write-Host "  ${esc}[2mpatch: $patchName${esc}[0m"
                 Install-Binary -Url $patchAsset.browser_download_url -Dest $patchPath
 
                 $proc = Start-Process -FilePath $r5Dest -ArgumentList "bspatch `"$r5Dest`" `"$newBin`" `"$patchPath`"" -NoNewWindow -Wait -PassThru
@@ -377,7 +377,7 @@ if (Test-Path $r5Dest) {
                     if ($newHash -eq $expectedHash) {
                         Move-Item -Path $newBin -Destination $r5Dest -Force
                         $patched = $true
-                        Write-Host "  `e[32m✓`e[0m radii5 updated (patch)"
+                        Write-Host "  ${esc}[32m✓${esc}[0m radii5 updated (patch)"
                     }
                 }
                 Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -389,11 +389,11 @@ if (Test-Path $r5Dest) {
             if (-not $asset) { throw "no asset: $assetName" }
             Write-Host ""
             Install-Binary -Url $asset.browser_download_url -Dest $r5Dest
-            Write-Host "  `e[32m✓`e[0m radii5 $latest installed (full)"
+            Write-Host "  ${esc}[32m✓${esc}[0m radii5 $latest installed (full)"
         }
     }
 } elseif (Get-Command "go" -ErrorAction SilentlyContinue) {
-    Write-Host "  `e[36m→`e[0m  building radii5 from source..."
+    Write-Host "  ${esc}[36m→${esc}[0m  building radii5 from source..."
     $tmpDir = Join-Path $env:TEMP "radii5-build"
     if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
@@ -407,9 +407,9 @@ if (Test-Path $r5Dest) {
     go build -o $r5Dest ./cmd/radii5/ 2>&1 | Out-Null
     Pop-Location
     Remove-Item $tmpDir -Recurse -Force
-    Write-Host "  `e[32m✓`e[0m radii5 built"
+    Write-Host "  ${esc}[32m✓${esc}[0m radii5 built"
 } else {
-    Write-Host "  `e[33m⚠`e[0m Go not found — install Go or download radii5 binary manually"
+    Write-Host "  ${esc}[33m⚠${esc}[0m Go not found — install Go or download radii5 binary manually"
 }
 Write-Host ""
 
@@ -418,11 +418,11 @@ $curPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
 if ($curPath -notlike "*$installDir*") {
     [System.Environment]::SetEnvironmentVariable("PATH", "$curPath;$installDir", "User")
     $env:PATH = "$env:PATH;$installDir"
-    Write-Host "  `e[32m✓`e[0m Added $installDir to PATH"
+    Write-Host "  ${esc}[32m✓${esc}[0m Added $installDir to PATH"
 } else {
-    Write-Host "  `e[2m✓ $installDir already in PATH`e[0m"
+    Write-Host "  ${esc}[2m✓ $installDir already in PATH${esc}[0m"
 }
 
 Write-Host ""
-Write-Host "  `e[1m`e[32mAll done!`e[0m  Try: radii5 --version"
+Write-Host "  ${esc}[1m${esc}[32mAll done!${esc}[0m  Try: radii5 --version"
 Write-Host ""
