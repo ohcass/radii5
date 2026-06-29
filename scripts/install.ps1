@@ -1,4 +1,4 @@
-# radii5 installer for Windows
+﻿# radii5 installer for Windows
 # Usage: irm https://raw.githubusercontent.com/ohcass/radii5/main/scripts/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
