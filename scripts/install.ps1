@@ -35,27 +35,122 @@ public static class ChunkDownloader
 {
     static long _downloaded;
     static long _total;
-    const  int  BarWidth = 30;
 
-    static string FmtBytes(long n) {
-        if (n >= 1 << 20) return string.Format("{0:F1} MB", (double)n / (1 << 20));
-        if (n >= 1 << 10) return string.Format("{0:F1} KB", (double)n / (1 << 10));
-        return n + " B";
+    const int    TrackLen    = 8;
+    const int    TrailSteps  = 6;
+    const int    HoldStart   = 30;
+    const int    HoldEnd     = 9;
+    const int    CycleLen    = TrackLen + HoldEnd + (TrackLen - 1) + HoldStart;
+    const int    TickMs      = 45;
+    const double MinAlpha    = 0.3;
+    const double InactiveFac = 0.6;
+
+    static int       _frame;
+    static int       _displayPct;
+    static DateTime  _displayTime;
+    static bool      _cursorHidden;
+    static readonly byte[]   _base  = new byte[] { 104, 163, 235 };
+    static readonly byte[][] _trail;
+
+    static ChunkDownloader() {
+        _trail = new byte[TrailSteps][];
+        for (int i = 0; i < TrailSteps; i++) {
+            double alpha  = i == 0 ? 1.0 : (i == 1 ? 0.9 : Math.Pow(0.65, i - 1));
+            double factor = i == 1 ? 1.15 : 1.0;
+            _trail[i] = new byte[] {
+                ClampByte(104 * factor * alpha),
+                ClampByte(163 * factor * alpha),
+                ClampByte(235 * factor * alpha)
+            };
+        }
+    }
+
+    static byte ClampByte(double v) {
+        if (v > 255) v = 255;
+        if (v < 0) v = 0;
+        return (byte)v;
+    }
+
+    struct FrameState {
+        public int  ActivePos, HoldProg, HoldTotal, MoveProg, MoveTotal;
+        public bool IsHolding, Forward;
+
+        public int ColorIdx(int ch) {
+            int dirDist = Forward ? ActivePos - ch : ch - ActivePos;
+            if (IsHolding) return dirDist + HoldProg;
+            if (dirDist < 0 || dirDist >= TrailSteps) return -1;
+            return dirDist;
+        }
+
+        public double DotAlpha() {
+            if (IsHolding && HoldTotal > 0) {
+                double prog = Math.Min(1.0, (double)HoldProg / HoldTotal);
+                return InactiveFac * Math.Max(MinAlpha, 1.0 - prog * (1.0 - MinAlpha));
+            }
+            if (!IsHolding && MoveTotal > 0) {
+                int    den  = Math.Max(1, MoveTotal - 1);
+                double prog = Math.Min(1.0, (double)MoveProg / den);
+                return InactiveFac * (MinAlpha + prog * (1.0 - MinAlpha));
+            }
+            return InactiveFac;
+        }
+    }
+
+    static FrameState GetFrameState(int f) {
+        if (f < TrackLen)
+            return new FrameState { ActivePos = f, MoveProg = f, MoveTotal = TrackLen, Forward = true };
+        if (f < TrackLen + HoldEnd)
+            return new FrameState { ActivePos = TrackLen - 1, IsHolding = true, HoldProg = f - TrackLen, HoldTotal = HoldEnd, Forward = true };
+        if (f < TrackLen + HoldEnd + (TrackLen - 1)) {
+            int back = f - TrackLen - HoldEnd;
+            return new FrameState { ActivePos = TrackLen - 2 - back, MoveProg = back, MoveTotal = TrackLen - 1, Forward = false };
+        }
+        return new FrameState { ActivePos = 0, IsHolding = true, HoldProg = f - TrackLen - HoldEnd - (TrackLen - 1), HoldTotal = HoldStart, Forward = false };
     }
 
     static void DrawBar(long cur, long tot) {
-        int filled = (tot > 0) ? (int)Math.Min((double)cur / tot * BarWidth, BarWidth) : BarWidth / 2;
-        int pct    = (tot > 0) ? (int)((double)cur / tot * 100) : 0;
-        string bar = new string('\u2588', filled) + new string('\u2591', BarWidth - filled);
-        string line = string.Format("  \u001b[36m[{0}]\u001b[0m  {1} / {2}  ({3}%)",
-            bar, FmtBytes(cur), FmtBytes(tot), pct);
-        Console.Write("\r" + line + "\u001b[K");
+        if (!_cursorHidden) {
+            _cursorHidden = true;
+            _frame        = 0;
+            _displayPct   = 0;
+            _displayTime  = DateTime.Now;
+            Console.Write("\u001b[?25l");
+        }
+
+        int ipct = tot > 0 ? (int)((double)cur / tot * 100) : 0;
+        if (ipct > 100) ipct = 100;
+        if (ipct > _displayPct) {
+            double elapsed = (DateTime.Now - _displayTime).TotalSeconds;
+            double rate    = elapsed > 0 ? (ipct - _displayPct) / elapsed : 0;
+            int    step    = rate > 50 ? 10 : (rate > 10 ? 5 : 1);
+            int    disp    = (ipct / step) * step;
+            if (disp > _displayPct || ipct >= 100) {
+                _displayPct  = disp;
+                _displayTime = DateTime.Now;
+            }
+        }
+
+        FrameState state = GetFrameState(_frame);
+        var sb = new System.Text.StringBuilder(TrackLen * 24);
+        for (int ch = 0; ch < TrackLen; ch++) {
+            int idx = state.ColorIdx(ch);
+            if (idx >= 0) {
+                byte[] c = _trail[idx];
+                sb.AppendFormat("\u001b[38;2;{0};{1};{2}m\u25A0", c[0], c[1], c[2]);
+            } else {
+                double a = state.DotAlpha();
+                sb.AppendFormat("\u001b[38;2;{0};{1};{2}m\u2B1D",
+                    ClampByte(_base[0] * a), ClampByte(_base[1] * a), ClampByte(_base[2] * a));
+            }
+        }
+        sb.Append("\u001b[0m \u001b[1m").Append(_displayPct).Append("%\u001b[0m");
+        Console.Write("\u001b[2K\r  " + sb.ToString());
+        _frame = (_frame + 1) % CycleLen;
     }
 
-    static void DrawBarDone(long tot) {
-        string bar  = new string('\u2588', BarWidth);
-        string line = string.Format("  \u001b[32m[{0}]\u001b[0m  {1} \u2713", bar, FmtBytes(tot));
-        Console.Write("\r" + line + "\u001b[K\n");
+    static void DrawBarDone() {
+        _cursorHidden = false;
+        Console.Write("\u001b[2K\r\u001b[?25h\n");
     }
 
     public static void Download(string url, string dest, int numThreads) {
@@ -84,7 +179,7 @@ public static class ChunkDownloader
                         DrawBar(_downloaded, total);
                     }
                 }
-                DrawBarDone(_downloaded);
+                DrawBarDone();
                 return;
             }
 
@@ -132,11 +227,11 @@ public static class ChunkDownloader
                 });
             }
 
-            while (!Task.WhenAll(tasks).Wait(80)) {
+            while (!Task.WhenAll(tasks).Wait(TickMs)) {
                 DrawBar(_downloaded, total);
             }
             DrawBar(total, total);
-            DrawBarDone(total);
+            DrawBarDone();
 
             if (!errors.IsEmpty) {
                 string msg;
@@ -171,7 +266,7 @@ function Install-Binary([string]$Url, [string]$Dest) {
     $size    = (Get-Item $Dest).Length
     $mbps    = [math]::Round(($size / 1MB) / $secs, 1)
     $elapsed = [math]::Round($secs, 1)
-    Write-Host "  $esc[2m${mbps} MB/s  (${elapsed}s,  $threads threads)$esc[0m"
+    Write-Host "  $esc[32m✓$esc[0m$esc[2m done  ${mbps} MB/s  (${elapsed}s,  $threads threads)$esc[0m"
 }
 
 # ── 1. yt-dlp ─────────────────────────────────────────────────────────────────
