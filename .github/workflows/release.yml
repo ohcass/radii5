@@ -58,6 +58,12 @@ jobs:
           go build -ldflags="-s -w -X main.version=${VERSION}" -o "${BINARY}" ./cmd/radii5
           if [ "${{ matrix.upx }}" != "false" ]; then
             upx --best --lzma "${BINARY}"
+            MAX_BYTES=5242880  # 5 MiB; current release ~3 MiB compressed
+            SIZE=$(stat -c%s "${BINARY}")
+            if [ "${SIZE}" -gt "${MAX_BYTES}" ]; then
+              echo "::error::Binary too large after UPX: ${SIZE} bytes (limit ${MAX_BYTES})."
+              exit 1
+            fi
           fi
 
       - name: Upload artifact
