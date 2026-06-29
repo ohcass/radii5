@@ -34,6 +34,7 @@ jobs:
             goarch: amd64
             suffix: windows-amd64
             ext: .exe
+            upx: false
 
     steps:
       - name: Checkout
