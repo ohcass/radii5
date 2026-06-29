@@ -12,10 +12,7 @@ $threads    = 8
 $arch   = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 $suffix = if ($arch -eq "Arm64") { "windows-arm64" } else { "windows-amd64" }
 
-Write-Host ""
-Write-Host "  radii5 installer" -ForegroundColor Cyan
-Write-Host "  platform: $suffix" -ForegroundColor DarkGray
-Write-Host ""
+Write-Host "radii5 installer ($suffix)" -ForegroundColor Cyan
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
@@ -273,30 +270,20 @@ function Install-Binary([string]$Url, [string]$Dest) {
 
 # == 1. yt-dlp =================================================================
 if (Get-Command "yt-dlp.exe" -ErrorAction SilentlyContinue) {
-    Write-Host "  yt-dlp already installed"
-    Write-Host ""
+    Write-Host "  yt-dlp   Done" -ForegroundColor Green
 } else {
-    Write-Host "  yt-dlp"
     $ytRel   = Get-GHRelease "yt-dlp/yt-dlp"
     $ytAsset = $ytRel.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
-    if (-not $ytAsset) { Write-Host "  yt-dlp.exe not found" -ForegroundColor Red; exit 1 }
-
-    $ytDest = Join-Path $installDir "yt-dlp.exe"
-    Write-Host "  version $($ytRel.tag_name)" -ForegroundColor DarkGray
-    Write-Host "  dest $ytDest" -ForegroundColor DarkGray
-    Write-Host ""
-    Install-Binary -Url $ytAsset.browser_download_url -Dest $ytDest
-    Write-Host "  yt-dlp $($ytRel.tag_name) installed" -ForegroundColor Green
-    Write-Host ""
+    if (-not $ytAsset) { Write-Host "  yt-dlp   not found in release" -ForegroundColor Red; exit 1 }
+    Install-Binary -Url $ytAsset.browser_download_url -Dest (Join-Path $installDir "yt-dlp.exe")
+    Write-Host "  yt-dlp   Done" -ForegroundColor Green
 }
 
 # == 2. ffmpeg =================================================================
 $ffDest = Join-Path $installDir "ffmpeg.exe"
 if (Test-Path $ffDest) {
-    Write-Host "  ffmpeg already installed"
-    Write-Host ""
+    Write-Host "  ffmpeg   Done" -ForegroundColor Green
 } else {
-    Write-Host "  ffmpeg"
     try {
         $ffRel   = Get-GHRelease "BtbN/FFmpeg-Builds"
         $ffAsset = $ffRel.assets |
@@ -312,13 +299,8 @@ if (Test-Path $ffDest) {
         $ffZip = Join-Path $env:TEMP "ffmpeg-radii5.zip"
         $ffTmp = Join-Path $env:TEMP "ffmpeg-radii5-extract"
 
-        Write-Host "  size $([math]::Round($ffAsset.size / 1MB, 1)) MB (zip)" -ForegroundColor DarkGray
-        Write-Host "  dest $installDir" -ForegroundColor DarkGray
-        Write-Host ""
-
         Install-Binary -Url $ffAsset.browser_download_url -Dest $ffZip
 
-        Write-Host "  extracting..."
         if (Test-Path $ffTmp) { Remove-Item $ffTmp -Recurse -Force }
         Expand-Archive -Path $ffZip -DestinationPath $ffTmp -Force
         Remove-Item $ffZip -Force
@@ -332,12 +314,10 @@ if (Test-Path $ffDest) {
         }
         Remove-Item $ffTmp -Recurse -Force
 
-        Write-Host "  ffmpeg installed" -ForegroundColor Green
-        Write-Host ""
+        Write-Host "  ffmpeg   Done" -ForegroundColor Green
     } catch {
-        Write-Host "  ffmpeg install failed: $_" -ForegroundColor Yellow
+        Write-Host "  ffmpeg   Failed: $_" -ForegroundColor Yellow
         Write-Host "  Install manually: https://ffmpeg.org/download.html"
-        Write-Host ""
     }
 }
 
@@ -351,10 +331,7 @@ if (Test-Path $r5Dest) {
     $checksumsUrl = "https://github.com/$repo/releases/download/$latest/checksums.txt"
     $checksums = (Invoke-RestMethod $checksumsUrl) -split "`n"
     $expectedHash = ($checksums | Where-Object { $_ -like "*$assetName*" } | ForEach-Object { $_.Split(' ')[0] }).ToLower()
-    if ($installedHash -eq $expectedHash) {
-        Write-Host "  radii5 up to date"
-    } else {
-        Write-Host "  updating radii5..."
+    if ($installedHash -ne $expectedHash) {
         $patched = $false
 
         # Try bsdiff patch for incremental update
@@ -370,7 +347,6 @@ if (Test-Path $r5Dest) {
                 $patchPath = Join-Path $tmpDir "update.bspatch"
                 $newBin = Join-Path $tmpDir "radii5-new.exe"
 
-                Write-Host "  patch $patchName" -ForegroundColor DarkGray
                 Install-Binary -Url $patchAsset.browser_download_url -Dest $patchPath
 
                 $proc = Start-Process -FilePath $r5Dest -ArgumentList "bspatch `"$r5Dest`" `"$newBin`" `"$patchPath`"" -NoNewWindow -Wait -PassThru
@@ -379,7 +355,6 @@ if (Test-Path $r5Dest) {
                     if ($newHash -eq $expectedHash) {
                         Move-Item -Path $newBin -Destination $r5Dest -Force
                         $patched = $true
-                        Write-Host "  radii5 updated (patch)" -ForegroundColor Green
                     }
                 }
                 Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -389,13 +364,11 @@ if (Test-Path $r5Dest) {
         if (-not $patched) {
             $asset = $rel.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
             if (-not $asset) { throw "no asset: $assetName" }
-            Write-Host ""
             Install-Binary -Url $asset.browser_download_url -Dest $r5Dest
-            Write-Host "  radii5 $latest installed (full)" -ForegroundColor Green
         }
     }
+    Write-Host "  radii5   Done" -ForegroundColor Green
 } elseif (Get-Command "go" -ErrorAction SilentlyContinue) {
-    Write-Host "  building radii5 from source..."
     $tmpDir = Join-Path $env:TEMP "radii5-build"
     if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
@@ -409,22 +382,19 @@ if (Test-Path $r5Dest) {
     go build -o $r5Dest ./cmd/radii5/ 2>&1 | Out-Null
     Pop-Location
     Remove-Item $tmpDir -Recurse -Force
-    Write-Host "  radii5 built" -ForegroundColor Green
+    Write-Host "  radii5   Done" -ForegroundColor Green
 } else {
-    Write-Host "  Go not found - install Go or download radii5 binary manually" -ForegroundColor Yellow
+    Write-Host "  radii5   Skipped (no Go)" -ForegroundColor Yellow
 }
-Write-Host ""
 
 # == 4. PATH ==================================================================
 $curPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
 if ($curPath -notlike "*$installDir*") {
     [System.Environment]::SetEnvironmentVariable("PATH", "$curPath;$installDir", "User")
     $env:PATH = "$env:PATH;$installDir"
-    Write-Host "  added $installDir to PATH" -ForegroundColor Green
-} else {
-    Write-Host "  $installDir already in PATH"
 }
+Write-Host "  PATH     Done" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "  installed. try: radii5 --version"
+Write-Host "verify: radii5 --version" -ForegroundColor DarkGray
 Write-Host ""
