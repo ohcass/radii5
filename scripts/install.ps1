@@ -226,7 +226,7 @@ public static class ChunkDownloader
                                     Interlocked.Add(ref _downloaded, -fi.Length);
                                     fi.Delete();
                                 }
-                                await Task.Delay(500 * (attempt + 1));
+                                Thread.Sleep(500 * (attempt + 1));
                             }
                         }
                     }
