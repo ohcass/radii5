@@ -14,7 +14,7 @@ import (
 	"github.com/ohcass/radii5/internal/progress"
 )
 
-func ytDlpFallback(url, format, outFile string, threads int, silent bool, mediaType string, quality int, tp *TrackProgress) error {
+func ytDlpFallback(url, format, outFile string, threads int, silent bool, mediaType string, quality int, size int64, tp *TrackProgress) error {
 	adaptiveThreads := DetermineThreads(0, threads)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -70,14 +70,18 @@ func ytDlpFallback(url, format, outFile string, threads int, silent bool, mediaT
 	}
 
 	var bar *progress.Bar
-	var mu sync.Mutex
-	var once sync.Once
+	// Pre-create the bar when size is known so the render frame is on
+	// screen immediately — no blank while yt-dlp boots.
+	if !silent && size > 0 {
+		bar = progress.NewBar(size)
+		bar.Set(0)
+	}
 
 	scan := func(r io.Reader, isErr bool) {
 		scanner := newLineScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
-			pct, dlTotal, dlCurrent, ok := parseYtDlpProgress(line)
+			_, dlTotal, dlCurrent, ok := parseYtDlpProgress(line)
 			if ok {
 				if tp != nil {
 					if dlCurrent <= 0 && dlTotal > 0 {
@@ -86,16 +90,8 @@ func ytDlpFallback(url, format, outFile string, threads int, silent bool, mediaT
 					tp.Total.Store(dlTotal)
 					tp.Current.Store(dlCurrent)
 				}
-				if !silent {
-					mu.Lock()
-					if bar == nil {
-						bar = progress.NewBar(dlTotal)
-					}
+				if bar != nil {
 					bar.Set(dlCurrent)
-					if pct >= 100 {
-						once.Do(func() { bar.Finish() })
-					}
-					mu.Unlock()
 				}
 			} else if isErr && strings.Contains(line, "ERROR") && !silent {
 				fmt.Fprintf(os.Stderr, "  %s\n", color.RedString(line))
@@ -111,11 +107,9 @@ func ytDlpFallback(url, format, outFile string, threads int, silent bool, mediaT
 	err = cmd.Wait()
 	wg.Wait()
 
-	mu.Lock()
 	if bar != nil {
-		once.Do(func() { bar.Finish() })
+		bar.Finish()
 	}
-	mu.Unlock()
 
 	if err != nil {
 		if ctx.Err() == context.Canceled {

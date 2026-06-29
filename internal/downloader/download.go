@@ -13,6 +13,15 @@ import (
 	"github.com/ohcass/radii5/internal/progress"
 )
 
+// doneLine is the atomic terminal sequence emitted on every successful
+// Download exit: show cursor, move up to the spinner/title line, erase it,
+// then write "  Done\n". The fixed `\\033[?25h` makes this safe to use
+// from any caller site even when the cursor was just hidden by
+// spinner.Stop() (which is now erase-only). One Print keeps the escape
+// sequence and the Done line from being split into separate OS writes by
+// a concurrent goroutine.
+const doneLine = "\033[?25h\033[1A\033[2K\r  Done\n"
+
 type TrackProgress struct {
 	Title      string
 	URL        string
@@ -39,6 +48,19 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 	if json {
 		silent = true
 	}
+
+	// spinner.Stop() is now erase-only, leaving the cursor hidden, so
+	// centralize cursor-restore once at function-exit scope. Every error
+	// path (parallelDownload, streamDownload, convertAudio, rename, HLS
+	// yt-dlp-fallback) gets covered automatically without a per-site
+	// progress.ShowCursor() call. JSON mode silences the spinner entirely,
+	// so the cursor was never hidden there — guard with `!silent` to keep
+	// the no-op escape out of machine-readable output pipelines.
+	defer func() {
+		if !silent {
+			progress.ShowCursor()
+		}
+	}()
 
 	var spinner *progress.Spinner
 	if json {
@@ -87,6 +109,7 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 		})
 	} else if !silent {
 		color.New(color.FgHiWhite, color.Bold).Printf("  %s\n", info.Title)
+		// cursor stays hidden from spinner; bar start will keep it that way
 	}
 
 	safeTitle := sanitizeFilename(info.Title)
@@ -150,36 +173,11 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 		}()
 	}
 
-	if mediaType == "video" {
-		if err := ytDlpFallback(url, format, outFile, threads, silent, mediaType, quality, tp); err != nil {
-			if json {
-				writeJSONEvent("error", map[string]any{"url": url, "error": err.Error()})
-			}
-			if tp != nil {
-				tp.Failed.Store(true)
-			}
-			return err
-		}
-		if json {
-			writeJSONEvent("complete", map[string]any{"title": info.Title, "url": url, "path": outFile})
-		}
-		if tp != nil {
-			tp.Done.Store(true)
-		}
-		return nil
-	}
+	tmpPath := outFile + ".tmp"
 
-	tmpFile := filepath.Join(outputDir, safeTitle+".tmp")
-
-	defer func() {
-		if r := recover(); r != nil {
-			os.Remove(tmpFile)
-			panic(r)
-		}
-		if err != nil {
-			os.Remove(tmpFile)
-		}
-	}()
+	// Best-effort cleanup on any exit (including panic). Downloads actually
+	// create tmpPath (outFile + ".tmp"), not a separately-named tmp.
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	isHLS := strings.Contains(info.URL, ".m3u8")
 	if info.URL != "" && !isHLS {
@@ -217,7 +215,29 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 			}
 		}
 
-		if format != info.Ext {
+		if mediaType == "video" {
+			// Video already comes down as a usable file from the parallel/stream
+			// downloader when info.URL is populated and HLS-free. Skip the audio
+			// conversion branch entirely — `format` is still the audio default
+			// ("mp3") and would otherwise mis-trigger convertAudio against the
+			// mp4/webm stream info.Ext. Mirror batch.go:rename only.
+			if err := os.Rename(tmpPath, outFile); err != nil {
+				os.Remove(tmpPath)
+				if json {
+					writeJSONEvent("error", map[string]any{"url": url, "error": err.Error()})
+				}
+				if tp != nil {
+					tp.Failed.Store(true)
+				}
+				return fmt.Errorf("rename failed: %w", err)
+			}
+			elapsed := time.Since(start)
+			if json {
+				writeJSONEvent("complete", map[string]any{"title": info.Title, "url": url, "path": outFile, "elapsed": elapsed.Round(time.Millisecond).String()})
+			} else if !silent {
+				fmt.Print(doneLine)
+			}
+		} else if format != info.Ext {
 			if tp != nil {
 				tp.Converting.Store(true)
 				tp.ConvertPct.Store(3)
@@ -251,7 +271,7 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 			if json {
 				writeJSONEvent("complete", map[string]any{"title": info.Title, "url": url, "path": outFile, "elapsed": elapsed.Round(time.Millisecond).String()})
 			} else if !silent {
-				fmt.Print("\033[1A\033[2K\r  Done\n")
+				fmt.Print(doneLine)
 			}
 		} else {
 			if err := os.Rename(tmpPath, outFile); err != nil {
@@ -268,12 +288,15 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 			if json {
 				writeJSONEvent("complete", map[string]any{"title": info.Title, "url": url, "path": outFile, "elapsed": elapsed.Round(time.Millisecond).String()})
 			} else if !silent {
-				fmt.Print("\033[1A\033[2K\r  Done\n")
+				fmt.Print(doneLine)
 			}
 		}
 
 		if format == "mp3" && mediaType != "video" {
-			_ = metadata.WriteMP3Tags(outFile, info.Title, info.DisplayArtist(), info.Album, info.Thumbnail)
+			// best-effort: dim stderr line on failure, never degrade the download
+			if err := metadata.WriteMP3Tags(outFile, info.Title, info.DisplayArtist(), info.Album, info.Thumbnail); err != nil {
+				fmt.Fprintf(os.Stderr, "\033[2m  ! tags: %v\033[0m\n", err)
+			}
 		}
 
 		if tp != nil {
@@ -281,7 +304,7 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 		}
 
 	} else {
-		if err := ytDlpFallback(url, format, outFile, threads, silent, mediaType, quality, tp); err != nil {
+		if err := ytDlpFallback(url, format, outFile, threads, silent, mediaType, quality, 0, tp); err != nil {
 			if json {
 				writeJSONEvent("error", map[string]any{"url": url, "error": err.Error()})
 			}
@@ -292,6 +315,8 @@ func Download(url, format, outputDir string, threads int, silent bool, tp *Track
 		}
 		if json {
 			writeJSONEvent("complete", map[string]any{"title": info.Title, "url": url, "path": outFile})
+		} else if !silent {
+			fmt.Print(doneLine)
 		}
 		if tp != nil {
 			tp.Done.Store(true)

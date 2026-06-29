@@ -640,9 +640,10 @@ func TestDisplayArtist(t *testing.T) {
 }
 
 func TestFormatDurationEdge(t *testing.T) {
-	// Edge cases
-	if got := formatDuration(math.MaxFloat64); got != "" {
-		// Just make sure it doesn't panic
+	// MaxFloat64 is a degenerate input but the formatter must not panic.
+	got := formatDuration(math.MaxFloat64)
+	if got == "" {
+		t.Errorf("formatDuration(math.MaxFloat64) returned empty, want non-empty")
 	}
 }
 

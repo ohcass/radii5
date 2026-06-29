@@ -2,27 +2,8 @@ package progress
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"time"
-)
-
-var segColors = []string{
-	"\033[38;2;104;163;235m",
-	"\033[38;2;101;157;248m",
-	"\033[38;2;70;105;165m",
-	"\033[38;2;48;73;110m",
-	"\033[38;2;36;51;74m",
-	"\033[38;2;26;37;52m",
-}
-
-const (
-	trackLen  = 8
-	boxCount  = 6
-	offExtra  = 3
-	tickMs    = 45
-	waitTicks = 20
-	waitEvery = 1
 )
 
 type Bar struct {
@@ -30,24 +11,39 @@ type Bar struct {
 	total       int64
 	current     int64
 	finished    bool
-	pos         int
-	dir         int
-	wait        int
-	cycle       int
+	frameNum    int
 	started     bool
 	stop        chan struct{}
 	displayPct  int
 	displayTime time.Time
+	palette     Palette
 }
 
 func NewBar(total int64) *Bar {
+	return NewBarWithPalette(total, BluePalette())
+}
+
+func NewBarWithPalette(total int64, palette Palette) *Bar {
 	return &Bar{
 		total:       total,
-		pos:         trackLen + offExtra,
-		dir:         -1,
+		palette:     palette,
 		stop:        make(chan struct{}),
 		displayTime: time.Now(),
 	}
+}
+
+func (b *Bar) SetTotal(total int64) {
+	b.mu.Lock()
+	if !b.finished {
+		b.total = total
+	}
+	b.mu.Unlock()
+}
+
+func (b *Bar) Total() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.total
 }
 
 func (b *Bar) Write(p []byte) (int, error) {
@@ -56,6 +52,10 @@ func (b *Bar) Write(p []byte) (int, error) {
 	if !b.finished {
 		b.current += int64(n)
 		b.startOnce()
+		// Do NOT render here: every HTTP range chunk callback would
+		// otherwise trigger a renderLock that races with the animator,
+		// causing the rapid bar flicker the user reported. The animate
+		// goroutine is the single source of visual updates.
 	}
 	b.mu.Unlock()
 	return n, nil
@@ -66,76 +66,12 @@ func (b *Bar) Set(current int64) {
 	if !b.finished {
 		b.current = current
 		b.startOnce()
+		// See Write — render only on tick.
 	}
 	b.mu.Unlock()
 }
 
-func (b *Bar) startOnce() {
-	if !b.started {
-		b.started = true
-		fmt.Print("\033[?25l")
-		go b.animate()
-	}
-}
-
-func (b *Bar) animate() {
-	t := time.NewTicker(tickMs * time.Millisecond)
-	defer t.Stop()
-	for {
-		select {
-		case <-b.stop:
-			return
-		case <-t.C:
-			b.mu.Lock()
-			if b.finished {
-				b.mu.Unlock()
-				return
-			}
-
-			if b.wait > 0 {
-				b.wait--
-				b.renderLocked()
-				b.mu.Unlock()
-				continue
-			}
-
-			b.pos += b.dir
-
-			lo := -boxCount - offExtra
-			hi := trackLen + offExtra
-			if b.pos > hi {
-				b.dir = -1
-				b.cycle++
-				if b.cycle%waitEvery == 0 {
-					b.wait = waitTicks
-				}
-			} else if b.pos < lo {
-				b.dir = 1
-			}
-
-			b.renderLocked()
-			b.mu.Unlock()
-		}
-	}
-}
-
 func (b *Bar) renderLocked() {
-	var s strings.Builder
-	s.Grow(trackLen * 12)
-	for i := 0; i < trackLen; i++ {
-		bi := i - b.pos
-		if bi >= 0 && bi < boxCount {
-			idx := bi
-			if b.dir > 0 {
-				idx = boxCount - 1 - bi
-			}
-			s.WriteString(segColors[idx])
-			s.WriteString("■")
-		} else {
-			s.WriteString("\033[38;5;239m·")
-		}
-	}
-	s.WriteString("\033[0m")
 	extra := ""
 	if b.total > 0 {
 		pct := float64(b.current) / float64(b.total) * 100
@@ -162,7 +98,37 @@ func (b *Bar) renderLocked() {
 		}
 		extra = fmt.Sprintf(" \033[1m%d%%\033[0m", b.displayPct)
 	}
-	fmt.Printf("\033[2K\r  %s%s", s.String(), extra)
+	// One Printf so Windows Console Host cannot split the erase and the
+	// bar content across two adjacent writes to the same os.Stdout handle.
+	fmt.Printf("\033[2K\r  %s%s", RenderAnimation(b.frameNum, b.palette), extra)
+}
+
+func (b *Bar) startOnce() {
+	if !b.started {
+		b.started = true
+		HideCursor()
+		go b.animate()
+	}
+}
+
+func (b *Bar) animate() {
+	t := time.NewTicker(TickMs * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-b.stop:
+			return
+		case <-t.C:
+			b.mu.Lock()
+			if b.finished {
+				b.mu.Unlock()
+				return
+			}
+			b.frameNum = (b.frameNum + 1) % CycleLen
+			b.renderLocked()
+			b.mu.Unlock()
+		}
+	}
 }
 
 func (b *Bar) Finish() {
@@ -173,6 +139,7 @@ func (b *Bar) Finish() {
 	}
 	b.finished = true
 	close(b.stop)
-	b.mu.Unlock()
+	// One Print, still under mu: serializes against any final animate tick.
 	fmt.Print("\033[2K\r\033[?25h")
+	b.mu.Unlock()
 }

@@ -119,9 +119,6 @@ func WriteMP3Tags(path, title, artist, album, thumbnailURL string) error {
 				Picture:     img,
 			}
 			tag.AddAttachedPicture(pic)
-		} else {
-			// Log error but don't fail the entire operation
-			fmt.Printf("Warning: failed to fetch thumbnail: %v\n", err)
 		}
 	}
 

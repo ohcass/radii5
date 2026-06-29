@@ -78,8 +78,6 @@ func ResolvePlaylist(playlistURL string) ([]PlaylistEntry, string, error) {
 	return entries, playlistTitle, nil
 }
 
-
-
 func runBatch(entries []PlaylistEntry, format, outputDir string, threads, workers int, mediaType string, quality int,
 	done *atomic.Int64, failed *atomic.Int64, total int64, json bool, retrying bool, spinner *progress.Spinner, playlistTitle string) []PlaylistEntry {
 
@@ -104,72 +102,18 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 
 	var (
 		mu       sync.Mutex
-		barPos   = 11
-		barDir   = -1
-		barCycle = 0
-		barWait  = 0
-		dispPct  = 0
+		frameNum int
+		dispPct  int
 		dispTime = time.Now()
 	)
 
 	render := func() {
 		d := done.Load()
-
-		if barWait > 0 {
-			barWait--
-		} else {
-			barPos += barDir
-			lo := -9
-			hi := 11
-			if barPos > hi {
-				barDir = -1
-				barCycle++
-				if barCycle%1 == 0 {
-					barWait = 20
-				}
-			} else if barPos < lo {
-				barDir = 1
-			}
-		}
-
-		var sb strings.Builder
-		sb.Grow(8 * 12)
-		cols := [][]string{
-			{
-				"\033[38;2;104;163;235m",
-				"\033[38;2;101;157;248m",
-				"\033[38;2;70;105;165m",
-				"\033[38;2;48;73;110m",
-				"\033[38;2;36;51;74m",
-				"\033[38;2;26;37;52m",
-			},
-			{
-				"\033[38;2;235;150;70m",
-				"\033[38;2;200;125;55m",
-				"\033[38;2;165;100;45m",
-				"\033[38;2;130;75;35m",
-				"\033[38;2;95;55;25m",
-				"\033[38;2;60;35;15m",
-			},
-		}
-		pal := 0
+		pal := progress.BluePalette()
 		if retrying {
-			pal = 1
+			pal = progress.OrangePalette()
 		}
-		for i := 0; i < 8; i++ {
-			bi := i - barPos
-			if bi >= 0 && bi < 6 {
-				idx := bi
-				if barDir > 0 {
-					idx = 5 - bi
-				}
-				sb.WriteString(cols[pal][idx])
-				sb.WriteString("■")
-			} else {
-				sb.WriteString("\033[38;5;239m·")
-			}
-		}
-		sb.WriteString("\033[0m")
+		anim := progress.RenderAnimation(frameNum, pal)
 
 		pct := dispPct
 		if total > 0 {
@@ -205,7 +149,10 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 			pct = dispPct
 		}
 
-		fmt.Printf("\033[2K\r  %s \033[1m%d%%\033[0m", sb.String(), pct)
+		// Atomic write: erase + content in one Printf so the per-tick
+		// render can't be split into a clearing pass and a content pass
+		// by another goroutine.
+		fmt.Printf("\033[2K\r  %s \033[1m%d%%\033[0m", anim, pct)
 	}
 
 	const resolvers = 8
@@ -342,7 +289,7 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 	} else {
 		go func() {
 			stopped := spinner == nil
-			ticker := time.NewTicker(80 * time.Millisecond)
+			ticker := time.NewTicker(progress.TickMs * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				select {
@@ -364,7 +311,7 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 							spinner.Stop()
 							if !json && playlistTitle != "" {
 								fmt.Printf("  %s\n", playlistTitle)
-								fmt.Print("\033[?25l")
+								progress.HideCursor()
 							}
 							stopped = true
 						}
@@ -372,6 +319,7 @@ func runBatch(entries []PlaylistEntry, format, outputDir string, threads, worker
 					if stopped {
 						mu.Lock()
 						render()
+						frameNum = (frameNum + 1) % progress.CycleLen
 						mu.Unlock()
 					}
 				}
@@ -456,11 +404,18 @@ func downloadResolved(info *VideoInfo, originalURL, format, outputDir string, th
 		}
 
 		if format == "mp3" && mediaType != "video" {
-			_ = metadata.WriteMP3Tags(outFile, info.Title, info.DisplayArtist(), info.Album, info.Thumbnail)
+			// best-effort: dim stderr line on failure, never degrade the download
+			if err := metadata.WriteMP3Tags(outFile, info.Title, info.DisplayArtist(), info.Album, info.Thumbnail); err != nil {
+				fmt.Fprintf(os.Stderr, "\033[2m  ! tags: %v\033[0m\n", err)
+			}
 		}
 
 	} else {
-		if err := ytDlpFallback(originalURL, format, outFile, threads, true, mediaType, quality, tp); err != nil {
+		size := info.Filesize
+		if size == 0 {
+			size = info.FilesizeApprox
+		}
+		if err := ytDlpFallback(originalURL, format, outFile, threads, true, mediaType, quality, size, tp); err != nil {
 			return err
 		}
 	}
@@ -560,6 +515,9 @@ func DownloadPlaylist(playlistURL, format, outputDir string, threads, workers in
 			"elapsed":    elapsed.String(),
 		})
 	} else {
+		// One atomic Print: cursor-show + erase-current + erase-prev + title
+		// newline so no download goroutine can wedge content between the
+		// cursor-show and the previous-line erase.
 		fmt.Print("\033[?25h\033[2K\r\033[1A\033[2K\r  Done\n")
 		if len(failedEntries) > 0 {
 			for _, t := range failedEntries {

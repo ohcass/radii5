@@ -23,13 +23,15 @@ func (s *Spinner) Start() {
 	if !s.started.CompareAndSwap(false, true) {
 		return
 	}
-	fmt.Print("\033[?25l")
+	HideCursor()
 	go func() {
 		i := 0
 		for {
 			select {
 			case <-s.stop:
-				fmt.Print("\033[2K\r\033[?25h")
+				// Erase spinner line; cursor stays hidden.
+				// The next phase (bar or final message) toggles visibility.
+				fmt.Print("\033[2K\r")
 				close(s.done)
 				return
 			case <-time.After(80 * time.Millisecond):

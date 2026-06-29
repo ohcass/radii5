@@ -37,6 +37,7 @@ func streamDownload(url, dest string, size int64, silent bool, tp *TrackProgress
 	var bar *progress.Bar
 	if !silent {
 		bar = progress.NewBar(size)
+		bar.Set(0)
 		writers = append(writers, bar)
 	}
 	if tp != nil {

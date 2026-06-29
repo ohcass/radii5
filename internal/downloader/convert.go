@@ -57,15 +57,17 @@ func convertAudioProgress(input, output, format string, durationSecs float64, tp
 		return convertAudio(input, output, format)
 	}
 
-	durationMs := int64(durationSecs * 1000000)
+	// ffmpeg's "-progress" output is named "out_time_ms=" but its value
+	// is in microseconds — long-standing upstream naming quirk.
+	durationUs := int64(durationSecs * 1000000)
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "out_time_ms=") {
 			val := strings.TrimPrefix(line, "out_time_ms=")
-			if ms, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64); err == nil && durationMs > 0 {
-				pct := int64(float64(ms) / float64(durationMs) * 100)
+			if us, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64); err == nil && durationUs > 0 {
+				pct := int64(float64(us) / float64(durationUs) * 100)
 				if pct > 100 {
 					pct = 100
 				}

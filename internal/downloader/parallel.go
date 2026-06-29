@@ -27,6 +27,7 @@ func parallelDownload(url, dest string, size int64, threads int, silent bool, tp
 	var bar *progress.Bar
 	if !silent {
 		bar = progress.NewBar(size)
+		bar.Set(0)
 	}
 
 	for i := 0; i < threads; i++ {
