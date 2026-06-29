@@ -134,7 +134,7 @@ public static class ChunkDownloader
         var sb = new System.Text.StringBuilder(TrackLen * 24);
         for (int ch = 0; ch < TrackLen; ch++) {
             int idx = state.ColorIdx(ch);
-            if (idx >= 0) {
+            if (idx >= 0 && idx < TrailSteps) {
                 byte[] c = _trail[idx];
                 sb.AppendFormat("\u001b[38;2;{0};{1};{2}m\u25A0", c[0], c[1], c[2]);
             } else {
