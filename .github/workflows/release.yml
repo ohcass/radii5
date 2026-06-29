@@ -46,6 +46,7 @@ jobs:
           go-version: "1.25"
 
       - name: Install UPX
+        if: matrix.upx != false
         run: sudo apt-get update && sudo apt-get install -y upx
 
       - name: Build & compress
