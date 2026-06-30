@@ -246,14 +246,8 @@ public static class ChunkDownloader
     }
 }
 "@
-Add-Type -Language CSharp -ReferencedAssemblies @(
-    'mscorlib',
-    'System',
-    'System.Net',
-    'System.Net.Http',
-    'System.Threading.Tasks',
-    'System.Collections.Concurrent'
-) ($src -replace '^\uFEFF', '')
+Add-Type -Language CSharp -TypeDefinition ($src -replace '^\uFEFF', '')
+
 } # end if ChunkDownloader not loaded
 
 # == helpers ==================================================================
